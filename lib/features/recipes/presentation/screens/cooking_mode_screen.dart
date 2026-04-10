@@ -121,11 +121,12 @@ class _CookingModeScreenState extends ConsumerState<CookingModeScreen> {
                           },
                           itemBuilder: (context, index) {
                             if (isLastStep && index == totalSteps - 1) {
-                              return _buildLastStep(recipe.steps[index], totalSteps, theme);
+                              return _buildLastStep(recipe, totalSteps, theme);
                             }
                             return StepView(
                               step: recipe.steps[index],
                               totalSteps: totalSteps,
+                              ingredients: recipe.ingredients,
                             );
                           },
                         ),
@@ -180,11 +181,15 @@ class _CookingModeScreenState extends ConsumerState<CookingModeScreen> {
   }
 
   Widget _buildLastStep(
-      dynamic step, int totalSteps, ThemeData theme) {
+      Recipe recipe, int totalSteps, ThemeData theme) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        StepView(step: step, totalSteps: totalSteps),
+        StepView(
+          step: recipe.steps.last,
+          totalSteps: totalSteps,
+          ingredients: recipe.ingredients,
+        ),
         const SizedBox(height: 16),
         Icon(
           Icons.check_circle_outline,
