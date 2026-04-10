@@ -15,17 +15,72 @@ class StepView extends StatelessWidget {
   });
 
   /// Findet Zutaten, deren Name im Schritt-Text vorkommt.
+  // Oberbegriffe → welche Zutaten gehören dazu
+  static const _groupWords = {
+    'gemüse': [
+      'paprika', 'zucchini', 'tomate', 'karotte', 'möhre', 'brokkoli',
+      'blumenkohl', 'aubergine', 'lauch', 'sellerie', 'spinat', 'mangold',
+      'kürbis', 'champignon', 'pilz', 'bohne', 'erbse', 'mais', 'fenchel',
+      'kohlrabi', 'radieschen', 'gurke', 'zwiebel', 'knoblauch', 'kartoffel',
+      'süßkartoffel', 'spargel', 'rote bete',
+    ],
+    'fleisch': [
+      'hackfleisch', 'hähnchen', 'huhn', 'rind', 'schwein', 'lamm', 'pute',
+      'steak', 'schnitzel', 'filet', 'gulasch', 'wurst', 'speck', 'schinken',
+    ],
+    'fisch': [
+      'lachs', 'thunfisch', 'kabeljau', 'forelle', 'garnele', 'scampi',
+      'pangasius', 'fischstäbchen', 'dorade', 'zander',
+    ],
+    'kräuter': [
+      'petersilie', 'basilikum', 'oregano', 'thymian', 'rosmarin',
+      'schnittlauch', 'dill', 'koriander', 'minze', 'salbei',
+    ],
+    'gewürze': [
+      'salz', 'pfeffer', 'paprikapulver', 'kurkuma', 'kreuzkümmel', 'zimt',
+      'muskat', 'chili', 'curry', 'ingwer', 'oregano', 'thymian',
+    ],
+    'nudeln': ['spaghetti', 'penne', 'fusilli', 'tagliatelle', 'linguine', 'nudel'],
+    'sauce': ['passata', 'tomatenmark', 'sojasoße', 'sojasauce', 'sahne', 'brühe'],
+  };
+
   List<Ingredient> _matchingIngredients() {
     if (ingredients.isEmpty) return [];
     final instructionLower = step.instruction.toLowerCase();
+    final instructionWords = instructionLower
+        .split(RegExp(r'[\s,.\-!?;:]+'))
+        .where((w) => w.length >= 3)
+        .toList();
+
+    // Oberbegriffe im Text finden → passende Zutatennamen sammeln
+    final groupMatches = <String>{};
+    for (final entry in _groupWords.entries) {
+      if (instructionLower.contains(entry.key)) {
+        groupMatches.addAll(entry.value);
+      }
+    }
+
     return ingredients.where((ing) {
       final name = ing.name.toLowerCase();
-      // Hauptwort der Zutat matchen (z.B. "Hackfleisch" aus "Hackfleisch (gemischt)")
       final mainName = name.split('(').first.trim();
-      // Auch einzelne Wörter prüfen (z.B. "Knoblauch" in "Knoblauchzehe")
-      return instructionLower.contains(mainName) ||
-          mainName.split(' ').any((word) =>
-              word.length >= 4 && instructionLower.contains(word));
+      // 1. Zutatenname kommt direkt im Text vor
+      if (instructionLower.contains(mainName)) return true;
+      // 2. Ein Wort der Zutat kommt im Text vor (z.B. "Knoblauch" aus "Knoblauchzehe")
+      final nameWords = mainName.split(' ').where((w) => w.length >= 4);
+      if (nameWords.any((word) => instructionLower.contains(word))) {
+        return true;
+      }
+      // 3. Ein Wort im Text ist Teil des Zutatennamens (z.B. "Reis" in "Basmatireis")
+      if (instructionWords.any((word) =>
+          word.length >= 4 && mainName.contains(word))) {
+        return true;
+      }
+      // 4. Oberbegriff-Matching (z.B. "Gemüse" → Paprika, Zucchini, ...)
+      if (groupMatches.isNotEmpty &&
+          groupMatches.any((g) => mainName.contains(g))) {
+        return true;
+      }
+      return false;
     }).toList();
   }
 
