@@ -1,20 +1,38 @@
+import 'dart:math';
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:rezepte/features/meal_planning/domain/models/meal_plan.dart';
 import 'package:rezepte/features/meal_planning/domain/models/meal_plan_entry.dart';
 import 'package:rezepte/features/meal_planning/presentation/providers/meal_plan_provider.dart';
-import 'package:rezepte/features/meal_planning/presentation/widgets/meal_day_card.dart';
 import 'package:rezepte/features/recipes/domain/models/recipe.dart';
 import 'package:rezepte/features/recipes/presentation/providers/recipes_provider.dart';
 
-const _dayNames = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+const _dayNamesFull = [
+  'Montag',
+  'Dienstag',
+  'Mittwoch',
+  'Donnerstag',
+  'Freitag',
+  'Samstag',
+  'Sonntag',
+];
 
-class MealPlanScreen extends ConsumerWidget {
+class MealPlanScreen extends ConsumerStatefulWidget {
   const MealPlanScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MealPlanScreen> createState() => _MealPlanScreenState();
+}
+
+class _MealPlanScreenState extends ConsumerState<MealPlanScreen> {
+  // Tracks which entries are currently animating a swap
+  final Map<String, GlobalKey<_SwapCardState>> _cardKeys = {};
+
+  @override
+  Widget build(BuildContext context) {
     final planAsync = ref.watch(currentMealPlanProvider);
     final recipesAsync = ref.watch(allRecipesProvider);
 
@@ -29,90 +47,232 @@ class MealPlanScreen extends ConsumerWidget {
           ),
         ],
       ),
-      body: planAsync.when(
-        data: (plan) {
-          if (plan == null) {
-            return _buildEmptyState(context, ref, recipesAsync);
-          }
-          return _buildPlan(context, ref, plan, recipesAsync);
+      body: recipesAsync.when(
+        data: (recipes) {
+          final recipeMap = {for (final r in recipes) r.id: r};
+          final plan = planAsync.valueOrNull;
+          return _buildWeekList(context, plan, recipeMap, recipes);
         },
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(child: Text('Fehler: $e')),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _generatePlan(context, ref, recipesAsync),
+        onPressed: () => _openPlanningSheet(context),
         icon: const Icon(Icons.auto_awesome),
-        label: const Text('Plan erstellen'),
+        label: const Text('Rezepte planen'),
       ),
     );
   }
 
-  Widget _buildEmptyState(
-      BuildContext context, WidgetRef ref, AsyncValue<List<Recipe>> recipesAsync) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.calendar_today, size: 64, color: Colors.grey.shade400),
-          const SizedBox(height: 16),
-          Text(
-            'Noch kein Wochenplan erstellt.',
-            style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
+  Widget _buildWeekList(BuildContext context, MealPlan? plan,
+      Map<String, Recipe> recipeMap, List<Recipe> allRecipes) {
+    final now = DateTime.now();
+    final monday = now.subtract(Duration(days: now.weekday - 1));
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 88),
+      itemCount: 7,
+      itemBuilder: (context, index) {
+        final dayOfWeek = index + 1;
+        final date = monday.add(Duration(days: index));
+        final isToday = date.day == now.day &&
+            date.month == now.month &&
+            date.year == now.year;
+
+        // Find entry for this day
+        final entry = plan?.entries
+            .where((e) => e.dayOfWeek == dayOfWeek)
+            .firstOrNull;
+        final recipe = entry != null ? recipeMap[entry.recipeId] : null;
+
+        return _buildDayRow(
+          context,
+          dayOfWeek: dayOfWeek,
+          dayName: _dayNamesFull[index],
+          date: date,
+          isToday: isToday,
+          entry: entry,
+          recipe: recipe,
+          plan: plan,
+          allRecipes: allRecipes,
+        );
+      },
+    );
+  }
+
+  Widget _buildDayRow(
+    BuildContext context, {
+    required int dayOfWeek,
+    required String dayName,
+    required DateTime date,
+    required bool isToday,
+    required MealPlanEntry? entry,
+    required Recipe? recipe,
+    required MealPlan? plan,
+    required List<Recipe> allRecipes,
+  }) {
+    final theme = Theme.of(context);
+    final dateStr =
+        '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.';
+
+    if (entry == null || recipe == null) {
+      // Empty day
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Card(
+          elevation: isToday ? 2 : 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: isToday
+                ? BorderSide(color: theme.colorScheme.primary, width: 2)
+                : BorderSide(color: theme.colorScheme.outlineVariant),
           ),
-          const SizedBox(height: 8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+            child: Row(
+              children: [
+                _buildDayLabel(theme, dayName, dateStr, isToday),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Text(
+                    'Kein Gericht geplant',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Day with recipe - use swap card
+    final cardKey = _cardKeys.putIfAbsent(
+      entry.id,
+      () => GlobalKey<_SwapCardState>(),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: _SwapCard(
+        key: cardKey,
+        theme: theme,
+        dayName: dayName,
+        dateStr: dateStr,
+        isToday: isToday,
+        entry: entry,
+        recipe: recipe,
+        onTap: () => context.push('/recipes/${recipe.id}'),
+        onSwap: () =>
+            _swapRecipe(context, cardKey, plan!, entry, allRecipes),
+        onToggleLock: () => _toggleLock(plan!, entry),
+      ),
+    );
+  }
+
+  Widget _buildDayLabel(
+      ThemeData theme, String dayName, String dateStr, bool isToday) {
+    return SizedBox(
+      width: 72,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           Text(
-            'Erstelle einen Plan basierend auf deinen Rezepten!',
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade500),
+            dayName,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+              color: isToday
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.onSurface,
+            ),
+          ),
+          Text(
+            dateStr,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildPlan(BuildContext context, WidgetRef ref, MealPlan plan,
-      AsyncValue<List<Recipe>> recipesAsync) {
-    return recipesAsync.when(
-      data: (recipes) {
-        final recipeMap = {for (final r in recipes) r.id: r};
+  Future<void> _swapRecipe(
+    BuildContext context,
+    GlobalKey<_SwapCardState> cardKey,
+    MealPlan plan,
+    MealPlanEntry entry,
+    List<Recipe> allRecipes,
+  ) async {
+    final usedIds = plan.entries.map((e) => e.recipeId).toSet();
+    final available =
+        allRecipes.where((r) => !usedIds.contains(r.id)).toList();
 
-        return ListView.builder(
-          padding: const EdgeInsets.all(12),
-          itemCount: plan.entries.length,
-          itemBuilder: (context, index) {
-            final entry = plan.entries[index];
-            final recipe = recipeMap[entry.recipeId];
-            final dayName =
-                entry.dayOfWeek >= 1 && entry.dayOfWeek <= 7
-                    ? _dayNames[entry.dayOfWeek - 1]
-                    : '?';
-
-            return MealDayCard(
-              dayName: dayName,
-              recipe: recipe,
-              entry: entry,
-              onTap: recipe != null
-                  ? () => context.push('/recipes/${recipe.id}')
-                  : null,
-              onSwap: () => _showSwapSheet(context, ref, plan, entry, recipes),
-              onToggleLock: () => _toggleLock(ref, plan, entry),
-            );
-          },
+    if (available.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Keine weiteren Rezepte zum Tauschen verfügbar.')),
         );
-      },
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('Fehler: $e')),
+      }
+      return;
+    }
+
+    // Pick a random new recipe
+    final newRecipe = available[Random().nextInt(available.length)];
+
+    // Trigger flip animation
+    await cardKey.currentState?.flipTo(newRecipe);
+
+    // Save to DB
+    final updatedEntries = plan.entries.map((e) {
+      if (e.id == entry.id) {
+        return e.copyWith(recipeId: newRecipe.id);
+      }
+      return e;
+    }).toList();
+    final updatedPlan = plan.copyWith(entries: updatedEntries);
+    await ref.read(mealPlanRepositoryProvider).saveMealPlan(updatedPlan);
+  }
+
+  Future<void> _toggleLock(MealPlan plan, MealPlanEntry entry) async {
+    final updatedEntries = plan.entries.map((e) {
+      if (e.id == entry.id) {
+        return e.copyWith(isLocked: !e.isLocked);
+      }
+      return e;
+    }).toList();
+    final updatedPlan = plan.copyWith(entries: updatedEntries);
+    await ref.read(mealPlanRepositoryProvider).saveMealPlan(updatedPlan);
+  }
+
+  void _openPlanningSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (context) => _PlanningSheet(
+        onConfirm: (selectedDays) => _generateForDays(context, selectedDays),
+      ),
     );
   }
 
-  Future<void> _generatePlan(
-      BuildContext context, WidgetRef ref, AsyncValue<List<Recipe>> recipesAsync) async {
-    final recipes = recipesAsync.valueOrNull ?? [];
+  Future<void> _generateForDays(
+    BuildContext context,
+    Map<int, _DayConfig> selectedDays,
+  ) async {
+    final recipes = ref.read(allRecipesProvider).valueOrNull ?? [];
     if (recipes.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Füge zuerst Rezepte hinzu, um einen Plan zu erstellen.'),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content:
+                  Text('Füge zuerst Rezepte hinzu, um einen Plan zu erstellen.')),
+        );
+      }
       return;
     }
 
@@ -124,81 +284,40 @@ class MealPlanScreen extends ConsumerWidget {
     final monday = now.subtract(Duration(days: now.weekday - 1));
     final weekStart = DateTime(monday.year, monday.month, monday.day);
 
-    // Keep locked entries from existing plan
+    // Keep locked entries from existing plan for non-selected days
     final existingPlan = await repo.getCurrentMealPlan();
-    final lockedEntries =
-        existingPlan?.entries.where((e) => e.isLocked).toList() ?? [];
+    final lockedEntries = existingPlan?.entries
+            .where(
+                (e) => e.isLocked && !selectedDays.containsKey(e.dayOfWeek))
+            .toList() ??
+        [];
 
-    final plan = generator.generate(
-      preferences: prefs,
+    // Adjust preferences for the selected number of days
+    final adjustedPrefs = prefs.copyWith(
+      mealsPerWeek: selectedDays.length + lockedEntries.length,
+    );
+
+    var plan = generator.generate(
+      preferences: adjustedPrefs,
       allRecipes: recipes,
       weekStartDate: weekStart,
       lockedEntries: lockedEntries,
     );
 
-    await repo.saveMealPlan(plan);
-  }
-
-  void _showSwapSheet(BuildContext context, WidgetRef ref, MealPlan plan,
-      MealPlanEntry entry, List<Recipe> recipes) {
-    final usedIds = plan.entries.map((e) => e.recipeId).toSet();
-    final available = recipes.where((r) => !usedIds.contains(r.id)).toList();
-
-    showModalBottomSheet(
-      context: context,
-      builder: (context) => Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text('Rezept tauschen',
-                style: Theme.of(context).textTheme.titleLarge),
-          ),
-          Expanded(
-            child: available.isEmpty
-                ? const Center(child: Text('Keine weiteren Rezepte verfügbar.'))
-                : ListView.builder(
-                    itemCount: available.length,
-                    itemBuilder: (context, index) {
-                      final recipe = available[index];
-                      return ListTile(
-                        title: Text(recipe.title),
-                        subtitle: Text(_categoryLabel(recipe.category)),
-                        onTap: () async {
-                          Navigator.pop(context);
-                          final updatedEntries = plan.entries.map((e) {
-                            if (e.id == entry.id) {
-                              return e.copyWith(recipeId: recipe.id);
-                            }
-                            return e;
-                          }).toList();
-                          final updatedPlan =
-                              plan.copyWith(entries: updatedEntries);
-                          await ref
-                              .read(mealPlanRepositoryProvider)
-                              .saveMealPlan(updatedPlan);
-                        },
-                      );
-                    },
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _toggleLock(
-      WidgetRef ref, MealPlan plan, MealPlanEntry entry) async {
+    // Apply custom servings from day configs
     final updatedEntries = plan.entries.map((e) {
-      if (e.id == entry.id) {
-        return e.copyWith(isLocked: !e.isLocked);
+      final config = selectedDays[e.dayOfWeek];
+      if (config != null && config.servings != prefs.defaultServings) {
+        return e.copyWith(servings: config.servings);
       }
       return e;
     }).toList();
-    final updatedPlan = plan.copyWith(entries: updatedEntries);
-    await ref.read(mealPlanRepositoryProvider).saveMealPlan(updatedPlan);
+
+    plan = plan.copyWith(entries: updatedEntries);
+    await repo.saveMealPlan(plan);
   }
 
-  String _categoryLabel(RecipeCategory category) {
+  String categoryLabel(RecipeCategory category) {
     switch (category) {
       case RecipeCategory.meat:
         return 'Fleisch';
@@ -209,5 +328,561 @@ class MealPlanScreen extends ConsumerWidget {
       case RecipeCategory.vegan:
         return 'Vegan';
     }
+  }
+}
+
+// ──────────────────────────────────────────
+// SwapCard with flip animation
+// ──────────────────────────────────────────
+
+class _SwapCard extends StatefulWidget {
+  final ThemeData theme;
+  final String dayName;
+  final String dateStr;
+  final bool isToday;
+  final MealPlanEntry entry;
+  final Recipe recipe;
+  final VoidCallback onTap;
+  final VoidCallback onSwap;
+  final VoidCallback onToggleLock;
+
+  const _SwapCard({
+    super.key,
+    required this.theme,
+    required this.dayName,
+    required this.dateStr,
+    required this.isToday,
+    required this.entry,
+    required this.recipe,
+    required this.onTap,
+    required this.onSwap,
+    required this.onToggleLock,
+  });
+
+  @override
+  State<_SwapCard> createState() => _SwapCardState();
+}
+
+class _SwapCardState extends State<_SwapCard>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _flipAnimation;
+  Recipe? _newRecipe;
+  bool _showingNew = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _flipAnimation = Tween<double>(begin: 0, end: 1).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOutBack),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> flipTo(Recipe newRecipe) async {
+    setState(() {
+      _newRecipe = newRecipe;
+      _showingNew = false;
+    });
+
+    _controller.reset();
+
+    // Listen for midpoint to flip content
+    void listener() {
+      if (_flipAnimation.value >= 0.5 && !_showingNew) {
+        setState(() => _showingNew = true);
+      }
+    }
+
+    _controller.addListener(listener);
+    await _controller.forward();
+    _controller.removeListener(listener);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final recipe =
+        (_showingNew && _newRecipe != null) ? _newRecipe! : widget.recipe;
+    final entry = widget.entry;
+    final theme = widget.theme;
+
+    return AnimatedBuilder(
+      animation: _flipAnimation,
+      builder: (context, child) {
+        final angle = _flipAnimation.value * pi;
+        final isBack = _flipAnimation.value >= 0.5;
+
+        return Transform(
+          alignment: Alignment.center,
+          transform: Matrix4.identity()
+            ..setEntry(3, 2, 0.001)
+            ..rotateX(isBack ? angle - pi : angle),
+          child: child,
+        );
+      },
+      child: Card(
+        elevation: widget.isToday ? 2 : 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: widget.isToday
+              ? BorderSide(color: theme.colorScheme.primary, width: 2)
+              : BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                _buildDayLabel(theme),
+                const SizedBox(width: 12),
+                // Recipe image
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: SizedBox(
+                    width: 64,
+                    height: 64,
+                    child: recipe.imageUrl != null
+                        ? CachedNetworkImage(
+                            imageUrl: recipe.imageUrl!,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, __, ___) => _buildPlaceholder(theme),
+                          )
+                        : _buildPlaceholder(theme),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Recipe info
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        recipe.title,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.people_outline,
+                              size: 14,
+                              color: theme.colorScheme.onSurfaceVariant),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${entry.servings} Portionen',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                          if (recipe.cookTimeMinutes != null) ...[
+                            const SizedBox(width: 12),
+                            Icon(Icons.timer_outlined,
+                                size: 14,
+                                color: theme.colorScheme.onSurfaceVariant),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${recipe.cookTimeMinutes} Min.',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // Actions
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        entry.isLocked ? Icons.lock : Icons.lock_open_outlined,
+                        size: 20,
+                        color: entry.isLocked
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                      onPressed: widget.onToggleLock,
+                      tooltip: entry.isLocked ? 'Entsperren' : 'Sperren',
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        Icons.refresh_rounded,
+                        size: 20,
+                        color: entry.isLocked
+                            ? theme.colorScheme.onSurfaceVariant
+                                .withValues(alpha: 0.3)
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                      onPressed: entry.isLocked ? null : widget.onSwap,
+                      tooltip: 'Anderes Rezept',
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDayLabel(ThemeData theme) {
+    return SizedBox(
+      width: 72,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            widget.dayName,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+              color: widget.isToday
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.onSurface,
+            ),
+          ),
+          Text(
+            widget.dateStr,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlaceholder(ThemeData theme) {
+    return Container(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Icon(Icons.restaurant,
+          color: theme.colorScheme.onSurfaceVariant),
+    );
+  }
+}
+
+// ──────────────────────────────────────────
+// Planning Sheet – select days + configure
+// ──────────────────────────────────────────
+
+class _DayConfig {
+  int servings = 4;
+  String? note;
+}
+
+class _PlanningSheet extends StatefulWidget {
+  final void Function(Map<int, _DayConfig> selectedDays) onConfirm;
+
+  const _PlanningSheet({required this.onConfirm});
+
+  @override
+  State<_PlanningSheet> createState() => _PlanningSheetState();
+}
+
+class _PlanningSheetState extends State<_PlanningSheet> {
+  final Map<int, _DayConfig> _selectedDays = {};
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-select weekdays
+    for (var i = 1; i <= 5; i++) {
+      _selectedDays[i] = _DayConfig();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+    final monday = now.subtract(Duration(days: now.weekday - 1));
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Handle
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                Icon(Icons.calendar_month, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Text(
+                  'Tage auswählen',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Text(
+              'Wähle die Tage, für die du Gerichte planst',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Flexible(
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: 7,
+              itemBuilder: (context, index) {
+                final dayOfWeek = index + 1;
+                final date = monday.add(Duration(days: index));
+                final isSelected = _selectedDays.containsKey(dayOfWeek);
+                final config = _selectedDays[dayOfWeek];
+                final dateStr =
+                    '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.';
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Card(
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      side: BorderSide(
+                        color: isSelected
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.outlineVariant,
+                        width: isSelected ? 2 : 1,
+                      ),
+                    ),
+                    color: isSelected
+                        ? theme.colorScheme.primaryContainer
+                            .withValues(alpha: 0.3)
+                        : null,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () {
+                        setState(() {
+                          if (isSelected) {
+                            _selectedDays.remove(dayOfWeek);
+                          } else {
+                            _selectedDays[dayOfWeek] = _DayConfig();
+                          }
+                        });
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 12),
+                        child: Row(
+                          children: [
+                            // Checkbox
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              width: 24,
+                              height: 24,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isSelected
+                                    ? theme.colorScheme.primary
+                                    : Colors.transparent,
+                                border: Border.all(
+                                  color: isSelected
+                                      ? theme.colorScheme.primary
+                                      : theme.colorScheme.outline,
+                                  width: 2,
+                                ),
+                              ),
+                              child: isSelected
+                                  ? const Icon(Icons.check,
+                                      size: 16, color: Colors.white)
+                                  : null,
+                            ),
+                            const SizedBox(width: 16),
+                            // Day name
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _dayNamesFull[index],
+                                    style:
+                                        theme.textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    dateStr,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color:
+                                          theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Servings + config
+                            if (isSelected && config != null) ...[
+                              Text(
+                                '${config.servings} P.',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              IconButton(
+                                icon: Icon(
+                                  Icons.settings_outlined,
+                                  size: 20,
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () =>
+                                    _showDayConfig(context, dayOfWeek, config),
+                                tooltip: 'Einstellungen',
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          // Confirm button
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _selectedDays.isEmpty
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        widget.onConfirm(Map.from(_selectedDays));
+                      },
+                icon: const Icon(Icons.auto_awesome),
+                label: Text(
+                  _selectedDays.isEmpty
+                      ? 'Tage auswählen'
+                      : 'Für ${_selectedDays.length} Tage planen',
+                ),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  textStyle: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDayConfig(
+      BuildContext context, int dayOfWeek, _DayConfig config) {
+    final theme = Theme.of(context);
+    var servings = config.servings;
+    final noteController = TextEditingController(text: config.note ?? '');
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('${_dayNamesFull[dayOfWeek - 1]} konfigurieren'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Servings
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Portionen', style: theme.textTheme.bodyLarge),
+                  Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.remove_circle_outline),
+                        onPressed: servings > 1
+                            ? () => setDialogState(() => servings--)
+                            : null,
+                      ),
+                      Text(
+                        '$servings',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add_circle_outline),
+                        onPressed: servings < 12
+                            ? () => setDialogState(() => servings++)
+                            : null,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Note / special wishes
+              TextField(
+                controller: noteController,
+                decoration: const InputDecoration(
+                  labelText: 'Besondere Wünsche',
+                  hintText: 'z.B. "etwas Leichtes", "Pasta"',
+                  border: OutlineInputBorder(),
+                ),
+                maxLines: 2,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Abbrechen'),
+            ),
+            FilledButton(
+              onPressed: () {
+                setState(() {
+                  config.servings = servings;
+                  config.note = noteController.text.isEmpty
+                      ? null
+                      : noteController.text;
+                });
+                Navigator.pop(context);
+              },
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
