@@ -67,28 +67,31 @@ class _MealPlanScreenState extends ConsumerState<MealPlanScreen> {
   Widget _buildWeekList(BuildContext context, MealPlan? plan,
       Map<String, Recipe> recipeMap, List<Recipe> allRecipes) {
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
+    final today = DateTime(now.year, now.month, now.day);
 
     return ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 88),
       itemCount: 7,
       itemBuilder: (context, index) {
-        final dayOfWeek = index + 1;
-        final date = monday.add(Duration(days: index));
-        final isToday = date.day == now.day &&
-            date.month == now.month &&
-            date.year == now.year;
+        final date = today.add(Duration(days: index));
+        final isToday = index == 0;
 
-        // Find entry for this day
-        final entry = plan?.entries
-            .where((e) => e.dayOfWeek == dayOfWeek)
-            .firstOrNull;
+        // Find entry by absolute date: position in plan = days since plan.weekStartDate + 1
+        MealPlanEntry? entry;
+        if (plan != null) {
+          final diff = date.difference(plan.weekStartDate).inDays;
+          if (diff >= 0 && diff < 7) {
+            final positionInPlan = diff + 1;
+            entry = plan.entries
+                .where((e) => e.dayOfWeek == positionInPlan)
+                .firstOrNull;
+          }
+        }
         final recipe = entry != null ? recipeMap[entry.recipeId] : null;
 
         return _buildDayRow(
           context,
-          dayOfWeek: dayOfWeek,
-          dayName: _dayNamesFull[index],
+          dayName: _dayNamesFull[date.weekday - 1],
           date: date,
           isToday: isToday,
           entry: entry,
@@ -102,7 +105,6 @@ class _MealPlanScreenState extends ConsumerState<MealPlanScreen> {
 
   Widget _buildDayRow(
     BuildContext context, {
-    required int dayOfWeek,
     required String dayName,
     required DateTime date,
     required bool isToday,
@@ -281,16 +283,25 @@ class _MealPlanScreenState extends ConsumerState<MealPlanScreen> {
     final repo = ref.read(mealPlanRepositoryProvider);
 
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
-    final weekStart = DateTime(monday.year, monday.month, monday.day);
+    final today = DateTime(now.year, now.month, now.day);
 
-    // Keep locked entries from existing plan for non-selected days
+    // Map locked entries from existing plan to positions in the new plan (today-based)
     final existingPlan = await repo.getCurrentMealPlan();
-    final lockedEntries = existingPlan?.entries
-            .where(
-                (e) => e.isLocked && !selectedDays.containsKey(e.dayOfWeek))
-            .toList() ??
-        [];
+    final lockedEntries = <MealPlanEntry>[];
+    if (existingPlan != null) {
+      for (final e in existingPlan.entries) {
+        if (!e.isLocked) continue;
+        // Absolute date of this entry
+        final entryDate = existingPlan.weekStartDate
+            .add(Duration(days: e.dayOfWeek - 1));
+        // Position in new plan (1..7)
+        final newPos = entryDate.difference(today).inDays + 1;
+        if (newPos >= 1 && newPos <= 7 &&
+            !selectedDays.containsKey(newPos)) {
+          lockedEntries.add(e.copyWith(dayOfWeek: newPos));
+        }
+      }
+    }
 
     // Adjust preferences for the selected number of days
     final adjustedPrefs = prefs.copyWith(
@@ -300,7 +311,7 @@ class _MealPlanScreenState extends ConsumerState<MealPlanScreen> {
     var plan = generator.generate(
       preferences: adjustedPrefs,
       allRecipes: recipes,
-      weekStartDate: weekStart,
+      weekStartDate: today,
       lockedEntries: lockedEntries,
     );
 
@@ -595,14 +606,20 @@ class _PlanningSheet extends StatefulWidget {
 }
 
 class _PlanningSheetState extends State<_PlanningSheet> {
+  // Map key = position in plan (1..7), where 1 = today
   final Map<int, _DayConfig> _selectedDays = {};
 
   @override
   void initState() {
     super.initState();
-    // Pre-select weekdays
-    for (var i = 1; i <= 5; i++) {
-      _selectedDays[i] = _DayConfig();
+    // Pre-select the next 5 days (excluding weekend days)
+    final now = DateTime.now();
+    for (var i = 0; i < 7; i++) {
+      final date = now.add(Duration(days: i));
+      // weekday: 1..5 = Mon..Fri
+      if (date.weekday >= 1 && date.weekday <= 5) {
+        _selectedDays[i + 1] = _DayConfig();
+      }
     }
   }
 
@@ -610,7 +627,7 @@ class _PlanningSheetState extends State<_PlanningSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
+    final today = DateTime(now.year, now.month, now.day);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 8, 0, 0),
@@ -659,12 +676,13 @@ class _PlanningSheetState extends State<_PlanningSheet> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               itemCount: 7,
               itemBuilder: (context, index) {
-                final dayOfWeek = index + 1;
-                final date = monday.add(Duration(days: index));
-                final isSelected = _selectedDays.containsKey(dayOfWeek);
-                final config = _selectedDays[dayOfWeek];
+                final position = index + 1; // 1..7, 1 = today
+                final date = today.add(Duration(days: index));
+                final isSelected = _selectedDays.containsKey(position);
+                final config = _selectedDays[position];
                 final dateStr =
                     '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.';
+                final dayName = _dayNamesFull[date.weekday - 1];
 
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 4),
@@ -688,9 +706,9 @@ class _PlanningSheetState extends State<_PlanningSheet> {
                       onTap: () {
                         setState(() {
                           if (isSelected) {
-                            _selectedDays.remove(dayOfWeek);
+                            _selectedDays.remove(position);
                           } else {
-                            _selectedDays[dayOfWeek] = _DayConfig();
+                            _selectedDays[position] = _DayConfig();
                           }
                         });
                       },
@@ -727,12 +745,37 @@ class _PlanningSheetState extends State<_PlanningSheet> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    _dayNamesFull[index],
-                                    style:
-                                        theme.textTheme.titleSmall?.copyWith(
-                                      fontWeight: FontWeight.w600,
-                                    ),
+                                  Row(
+                                    children: [
+                                      Text(
+                                        dayName,
+                                        style: theme.textTheme.titleSmall
+                                            ?.copyWith(
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      if (position == 1) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: theme.colorScheme.primary,
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                          ),
+                                          child: Text(
+                                            'Heute',
+                                            style: theme.textTheme.labelSmall
+                                                ?.copyWith(
+                                              color:
+                                                  theme.colorScheme.onPrimary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                   Text(
                                     dateStr,
@@ -761,7 +804,7 @@ class _PlanningSheetState extends State<_PlanningSheet> {
                                 ),
                                 visualDensity: VisualDensity.compact,
                                 onPressed: () =>
-                                    _showDayConfig(context, dayOfWeek, config),
+                                    _showDayConfig(context, dayName, config),
                                 tooltip: 'Einstellungen',
                               ),
                             ],
@@ -808,7 +851,7 @@ class _PlanningSheetState extends State<_PlanningSheet> {
   }
 
   void _showDayConfig(
-      BuildContext context, int dayOfWeek, _DayConfig config) {
+      BuildContext context, String dayName, _DayConfig config) {
     final theme = Theme.of(context);
     var servings = config.servings;
     final noteController = TextEditingController(text: config.note ?? '');
@@ -817,7 +860,7 @@ class _PlanningSheetState extends State<_PlanningSheet> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('${_dayNamesFull[dayOfWeek - 1]} konfigurieren'),
+          title: Text('$dayName konfigurieren'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

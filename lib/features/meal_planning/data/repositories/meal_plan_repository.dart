@@ -35,6 +35,8 @@ class MealPlanRepository implements MealPlanRepositoryInterface {
     if (existing != null) {
       await _datasource.deleteMealPlan(existing.id);
     }
+    // Clean up outdated plans so only the current 7-day window remains
+    await _datasource.deleteOutdatedPlans();
 
     await _datasource.insertMealPlan(db.MealPlansCompanion.insert(
       id: plan.id,

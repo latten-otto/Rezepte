@@ -8,11 +8,15 @@ class MealPlanLocalDatasource {
 
   Future<db.MealPlan?> getCurrentMealPlan() async {
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
-    final weekStart = DateTime(monday.year, monday.month, monday.day);
+    final today = DateTime(now.year, now.month, now.day);
+    // A plan is "current" if its 7-day window still covers today,
+    // i.e. weekStartDate >= today - 6 days
+    final earliest = today.subtract(const Duration(days: 6));
 
     return (_db.select(_db.mealPlans)
-          ..where((t) => t.weekStartDate.equals(weekStart)))
+          ..where((t) => t.weekStartDate.isBiggerOrEqualValue(earliest))
+          ..orderBy([(t) => OrderingTerm.desc(t.weekStartDate)])
+          ..limit(1))
         .getSingleOrNull();
   }
 
@@ -24,12 +28,28 @@ class MealPlanLocalDatasource {
 
   Stream<db.MealPlan?> watchCurrentMealPlan() {
     final now = DateTime.now();
-    final monday = now.subtract(Duration(days: now.weekday - 1));
-    final weekStart = DateTime(monday.year, monday.month, monday.day);
+    final today = DateTime(now.year, now.month, now.day);
+    final earliest = today.subtract(const Duration(days: 6));
 
     return (_db.select(_db.mealPlans)
-          ..where((t) => t.weekStartDate.equals(weekStart)))
+          ..where((t) => t.weekStartDate.isBiggerOrEqualValue(earliest))
+          ..orderBy([(t) => OrderingTerm.desc(t.weekStartDate)])
+          ..limit(1))
         .watchSingleOrNull();
+  }
+
+  /// Removes plans whose 7-day window is entirely in the past.
+  Future<void> deleteOutdatedPlans() async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final cutoff = today.subtract(const Duration(days: 6));
+
+    final oldPlans = await (_db.select(_db.mealPlans)
+          ..where((t) => t.weekStartDate.isSmallerThanValue(cutoff)))
+        .get();
+    for (final plan in oldPlans) {
+      await deleteMealPlan(plan.id);
+    }
   }
 
   Future<void> insertMealPlan(db.MealPlansCompanion plan) {
