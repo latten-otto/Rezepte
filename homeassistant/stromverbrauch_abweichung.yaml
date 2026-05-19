@@ -1,0 +1,86 @@
+# Stromverbrauch-Abweichung gegenüber Jahresbudget (4000 kWh)
+#
+# Quelle: sensor.tibber_pulse_zuhause_zahlerstand_verbrauch
+#         (monoton steigender Zählerstand in kWh)
+#
+# Idee:
+#   1. Mit `utility_meter` den Verbrauch pro Monat bzw. Jahr aus dem
+#      Zählerstand ableiten (Reset jeweils zum Monats-/Jahresanfang).
+#   2. Mit Template-Sensoren den "geplanten" Verbrauch zum aktuellen
+#      Zeitpunkt errechnen (linear über die Periode verteilt) und mit
+#      dem Ist-Verbrauch vergleichen.
+#
+# Ergebnis:
+#   - sensor.stromverbrauch_abweichung_monat  (kWh, positiv = über Plan)
+#   - sensor.stromverbrauch_abweichung_jahr   (kWh, positiv = über Plan)
+#
+# Einbindung in configuration.yaml:
+#   utility_meter: !include homeassistant/stromverbrauch_abweichung.yaml
+# – oder einfach den Inhalt in die passenden Top-Level-Blöcke kopieren.
+
+utility_meter:
+  stromverbrauch_monatlich:
+    source: sensor.tibber_pulse_zuhause_zahlerstand_verbrauch
+    name: Stromverbrauch monatlich
+    cycle: monthly
+  stromverbrauch_jaehrlich:
+    source: sensor.tibber_pulse_zuhause_zahlerstand_verbrauch
+    name: Stromverbrauch jährlich
+    cycle: yearly
+
+template:
+  - sensor:
+      - name: "Stromverbrauch Abweichung Monat"
+        unique_id: stromverbrauch_abweichung_monat
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {% set jahresbudget = 4000 %}
+          {% set jetzt = now() %}
+          {% set monatsanfang = jetzt.replace(day=1, hour=0, minute=0, second=0, microsecond=0) %}
+          {% set naechster_monat = (monatsanfang + timedelta(days=32)).replace(day=1) %}
+          {% set tage_im_monat = (naechster_monat - monatsanfang).days %}
+          {% set anteil = ((jetzt - monatsanfang).total_seconds()
+                           / (naechster_monat - monatsanfang).total_seconds()) %}
+          {% set monatsbudget = jahresbudget / 12 %}
+          {% set geplant = monatsbudget * anteil %}
+          {% set verbrauch = states('sensor.stromverbrauch_monatlich') | float(0) %}
+          {{ (verbrauch - geplant) | round(2) }}
+        attributes:
+          jahresbudget_kwh: 4000
+          monatsbudget_kwh: "{{ (4000 / 12) | round(2) }}"
+          geplant_bisher_kwh: >
+            {% set jetzt = now() %}
+            {% set monatsanfang = jetzt.replace(day=1, hour=0, minute=0, second=0, microsecond=0) %}
+            {% set naechster_monat = (monatsanfang + timedelta(days=32)).replace(day=1) %}
+            {% set anteil = ((jetzt - monatsanfang).total_seconds()
+                             / (naechster_monat - monatsanfang).total_seconds()) %}
+            {{ ((4000 / 12) * anteil) | round(2) }}
+          ist_verbrauch_kwh: "{{ states('sensor.stromverbrauch_monatlich') }}"
+
+      - name: "Stromverbrauch Abweichung Jahr"
+        unique_id: stromverbrauch_abweichung_jahr
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: measurement
+        state: >
+          {% set jahresbudget = 4000 %}
+          {% set jetzt = now() %}
+          {% set jahresanfang = jetzt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0) %}
+          {% set naechstes_jahr = jahresanfang.replace(year=jahresanfang.year + 1) %}
+          {% set anteil = ((jetzt - jahresanfang).total_seconds()
+                           / (naechstes_jahr - jahresanfang).total_seconds()) %}
+          {% set geplant = jahresbudget * anteil %}
+          {% set verbrauch = states('sensor.stromverbrauch_jaehrlich') | float(0) %}
+          {{ (verbrauch - geplant) | round(2) }}
+        attributes:
+          jahresbudget_kwh: 4000
+          geplant_bisher_kwh: >
+            {% set jetzt = now() %}
+            {% set jahresanfang = jetzt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0) %}
+            {% set naechstes_jahr = jahresanfang.replace(year=jahresanfang.year + 1) %}
+            {% set anteil = ((jetzt - jahresanfang).total_seconds()
+                             / (naechstes_jahr - jahresanfang).total_seconds()) %}
+            {{ (4000 * anteil) | round(2) }}
+          ist_verbrauch_kwh: "{{ states('sensor.stromverbrauch_jaehrlich') }}"
